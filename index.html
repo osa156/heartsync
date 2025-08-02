@@ -1,0 +1,365 @@
+<script type="text/javascript">
+        var gk_isXlsx = false;
+        var gk_xlsxFileLookup = {};
+        var gk_fileData = {};
+        function filledCell(cell) {
+          return cell !== '' && cell != null;
+        }
+        function loadFileData(filename) {
+        if (gk_isXlsx && gk_xlsxFileLookup[filename]) {
+            try {
+                var workbook = XLSX.read(gk_fileData[filename], { type: 'base64' });
+                var firstSheetName = workbook.SheetNames[0];
+                var worksheet = workbook.Sheets[firstSheetName];
+
+                // Convert sheet to JSON to filter blank rows
+                var jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, blankrows: false, defval: '' });
+                // Filter out blank rows (rows where all cells are empty, null, or undefined)
+                var filteredData = jsonData.filter(row => row.some(filledCell));
+
+                // Heuristic to find the header row by ignoring rows with fewer filled cells than the next row
+                var headerRowIndex = filteredData.findIndex((row, index) =>
+                  row.filter(filledCell).length >= filteredData[index + 1]?.filter(filledCell).length
+                );
+                // Fallback
+                if (headerRowIndex === -1 || headerRowIndex > 25) {
+                  headerRowIndex = 0;
+                }
+
+                // Convert filtered JSON back to CSV
+                var csv = XLSX.utils.aoa_to_sheet(filteredData.slice(headerRowIndex)); // Create a new sheet from filtered array of arrays
+                csv = XLSX.utils.sheet_to_csv(csv, { header: 1 });
+                return csv;
+            } catch (e) {
+                console.error(e);
+                return "";
+            }
+        }
+        return gk_fileData[filename] || "";
+        }
+        </script><!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HeartSync - Dating App</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+  <script src="https://unpkg.com/@paystack/inline-js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/peerjs@1.4.7/dist/peerjs.min.js"></script>
+  <script src="https://unpkg.com/babel-standalone@6/babel.min.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    const App = () => {
+      const [user, setUser] = useState(null);
+      const [isAuthenticated, setIsAuthenticated] = useState(false);
+      const [page, setPage] = useState('login');
+      const [profiles, setProfiles] = useState([]);
+      const [currentProfileIndex, setCurrentProfileIndex] = useState(0);
+      const [messages, setMessages] = useState([]);
+      const [chatUser, setChatUser] = useState(null);
+      const [call, setCall] = useState(null);
+      const [swipeCount, setSwipeCount] = useState(0);
+      const videoRef = useRef(null);
+      const remoteVideoRef = useRef(null);
+      const peerRef = useRef(null);
+      const ws = useRef(null);
+
+      // Initialize WebSocket
+      useEffect(() => {
+        ws.current = new WebSocket('ws://localhost:5000');
+        ws.current.onmessage = (event) => {
+          const message = JSON.parse(event.data);
+          setMessages((prev) => [...prev, message]);
+        };
+        return () => ws.current.close();
+      }, []);
+
+      // Initialize PeerJS for WebRTC
+      useEffect(() => {
+        peerRef.current = new Peer();
+        peerRef.current.on('open', (id) => {
+          axios.post('http://localhost:5000/api/peer-id', { userId: user?._id, peerId: id });
+        });
+        peerRef.current.on('call', (incomingCall) => {
+          setCall(incomingCall);
+          navigator.mediaDevices.getUserMedia({ video: true, audio: true }).then((stream) => {
+            videoRef.current.srcObject = stream;
+            incomingCall.answer(stream);
+            incomingCall.on('stream', (remoteStream) => {
+              remoteVideoRef.current.srcObject = remoteStream;
+            });
+          });
+        });
+      }, [user]);
+
+      // Fetch profiles and swipe count
+      const fetchProfiles = async () => {
+        const res = await axios.get('http://localhost:5000/api/profiles', {
+          headers: { Authorization: `Bearer ${localStorage.getItem('token')}` },
+        });
+        setProfiles(res.data.profiles);
+        setSwipeCount(res.data.swipeCount || 0);
+      };
+
+      // Handle swipe
+      const handleSwipe = async (direction, profileId) => {
+        try {
+          const res = await axios.post(
+            'http://localhost:5000/api/swipe',
+            { profileId, direction },
+            { headers: { Authorization: `Bearer ${localStorage.getItem('token')}` } }
+          );
+          if (res.data.needsPayment) {
+            handleMaleSubscription();
+          } else {
+            setSwipeCount(res.data.swipeCount);
+            setCurrentProfileIndex(currentProfileIndex + 1);
+          }
+        } catch (err) {
+          alert('Swipe failed');
+        }
+      };
+
+      // Handle login
+      const handleLogin = async (e) => {
+        e.preventDefault();
+        const email = e.target.email.value;
+        const password = e.target.password.value;
+        try {
+          const res = await axios.post('http://localhost:5000/api/auth/login', { email, password });
+          localStorage.setItem('token', res.data.token);
+          setUser(res.data.user);
+          setIsAuthenticated(true);
+          setPage('home');
+          fetchProfiles();
+        } catch (err) {
+          alert('Login failed');
+        }
+      };
+
+      // Handle signup
+      const handleSignup = async (e) => {
+        e.preventDefault();
+        const email = e.target.email.value;
+        const password = e.target.password.value;
+        const gender = e.target.gender.value;
+        try {
+          const res = await axios.post('http://localhost:5000/api/auth/signup', { email, password, gender });
+          localStorage.setItem('token', res.data.token);
+          setUser(res.data.user);
+          setIsAuthenticated(true);
+          setPage('profile');
+        } catch (err) {
+          alert('Signup failed');
+        }
+      };
+
+      // Handle password recovery
+      const handleRecovery = async (e) => {
+        e.preventDefault();
+        const email = e.target.email.value;
+        try {
+          await axios.post('http://localhost:5000/api/auth/recover', { email });
+          alert('Recovery email sent');
+        } catch (err) {
+          alert('Recovery failed');
+        }
+      };
+
+      // Handle profile form
+      const handleProfileSubmit = async (e) => {
+        e.preventDefault();
+        const formData = new FormData(e.target);
+        const data = Object.fromEntries(formData);
+        try {
+          await axios.post('http://localhost:5000/api/profile', data, {
+            headers: { Authorization: `Bearer ${localStorage.getItem('token')}` },
+          });
+          setPage('home');
+          fetchProfiles();
+        } catch (err) {
+          alert('Profile update failed');
+        }
+      };
+
+      // Handle Paystack payment for women
+      const handleFemalePayment = (plan) => {
+        const handler = PaystackPop.setup({
+          key: 'pk_live_669ad09183f1ded9229c99297d5d67f539e3c828',
+          email: user.email,
+          amount: plan === 'basic' ? 0 : plan === 'standard' ? 1000 * 100 : plan === 'premium' ? 2000 * 100 : 10000 * 100,
+          currency: 'USD',
+          callback: async (response) => {
+            await axios.post('http://localhost:5000/api/subscription', { plan, reference: response.reference }, {
+              headers: { Authorization: `Bearer ${localStorage.getItem('token')}` },
+            });
+            alert('Payment successful');
+            setUser({ ...user, subscription: plan });
+            fetchProfiles();
+          },
+          onClose: () => alert('Payment cancelled'),
+        });
+        handler.openIframe();
+      };
+
+      // Handle Paystack payment for men
+      const handleMaleSubscription = () => {
+        const handler = PaystackPop.setup({
+          key: 'pk_live_669ad09183f1ded9229c99297d5d67f539e3c828',
+          email: user.email,
+          amount: 300, // $3 in kobo
+          currency: 'USD',
+          callback: async (response) => {
+            const res = await axios.post('http://localhost:5000/api/male-subscription', { reference: response.reference }, {
+              headers: { Authorization: `Bearer ${localStorage.getItem('token')}` },
+            });
+            alert('Payment successful');
+            setSwipeCount(res.data.swipeCount);
+            setCurrentProfileIndex(currentProfileIndex + 1);
+          },
+          onClose: () => alert('Payment cancelled'),
+        });
+        handler.openIframe();
+      };
+
+      // Handle video call
+      const startVideoCall = async (peerId) => {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        videoRef.current.srcObject = stream;
+        const call = peerRef.current.call(peerId, stream);
+        call.on('stream', (remoteStream) => {
+          remoteVideoRef.current.srcObject = remoteStream;
+        });
+        setCall(call);
+      };
+
+      // Handle messaging
+      const sendMessage = (e) => {
+        e.preventDefault();
+        const message = e.target.message.value;
+        ws.current.send(JSON.stringify({ sender: user._id, receiver: chatUser._id, message }));
+        e.target.reset();
+      };
+
+      // Render components based on page
+      return (
+        <div className="container mx-auto p-4">
+          {page === 'login' && (
+            <form onSubmit={handleLogin} className="max-w-md mx-auto">
+              <h2 className="text-2xl mbRegions:4">Login to HeartSync</h2>
+              <input name="email" type="email" placeholder="Email" className="w-full mb-2 p-2 border" required />
+              <input name="password" type="text" placeholder="Password" className="w-full mb-2 p-2 border" required />
+              <button type="submit" className="w-full p-2 bg-blue-500 text-white">Login</button>
+              <button onClick={() => setPage('signup')} className="w-full p-2 mt-2 bg-gray-500 text-white">Signup</button>
+              <button onClick={() => setPage('recover')} className="w-full p-2 mt-2 bg-gray-500 text-white">Recover Password</button>
+            </form>
+          )}
+          {page === 'signup' && (
+            <form onSubmit={handleSignup} className="max-w-md mx-auto">
+              <h2 className="text-2xl mb-4">Signup for HeartSync</h2>
+              <input name="email" type="email" placeholder="Email" className="w-full mb-2 p-2 border" required />
+              <input name="password" type="text" placeholder="Password" className="w-full mb-2 p-2 border" required />
+              <select name="gender" className="w-full mb-2 p-2 border" required>
+                <option value="male">Male</option>
+                <option value="female">Female</option>
+              </select>
+              <button type="submit" className="w-full p-2 bg-blue-500 text-white">Signup</button>
+              <button onClick={() => setPage('login')} className="w-full p-2 mt-2 bg-gray-500 text-white">Back to Login</button>
+            </form>
+          )}
+          {page === 'recover' && (
+            <form onSubmit={handleRecovery} className="max-w-md mx-auto">
+              <h2 className="text-2xl mb-4">Recover Password</h2>
+              <input name="email" type="email" placeholder="Email" className="w-full mb-2 p-2 border" required />
+              <button type="submit" className="w-full p-2 bg-blue-500 text-white">Send Recovery Email</button>
+              <button onClick={() => setPage('login')} className="w-full p-2 mt-2 bg-gray-500 text-white">Back to Login</button>
+            </form>
+          )}
+          {page === 'profile' && (
+            <form onSubmit={handleProfileSubmit} className="max-w-md mx-auto">
+              <h2 className="text-2xl mb-4">Complete Your Profile</h2>
+              <input name="name" type="text" placeholder="Name" className="w-full mb-2 p-2 border" required />
+              {user.gender === 'male' ? (
+                <>
+                  <input name="income" type="number" placeholder="Annual Income (USD)" className="w-full mb-2 p-2 border" required />
+                  <input name="occupation" type="text" placeholder="Occupation" className="w-full mb-2 p-2 border" required />
+                </>
+              ) : (
+                <>
+                  <input name="interests" type="text" placeholder="Interests (comma-separated)" className="w-full mb-2 p-2 border" required />
+                  <input name="bio" type="text" placeholder="Bio" className="w-full mb-2 p-2 border" required />
+                </>
+              )}
+              <button type="submit" className="w-full p-2 bg-blue-500 text-white">Save Profile</button>
+            </form>
+          )}
+          {page === 'home' && (
+            <div>
+              <h2 className="text-2xl mb-4">Swipe Profiles</h2>
+              {profiles[currentProfileIndex] ? (
+                <div className="max-w-md mx-auto border p-4">
+                  <h3>{profiles[currentProfileIndex].name}</h3>
+                  {profiles[currentProfileIndex].income && <p>Income: ${profiles[currentProfileIndex].income}</p>}
+                  {profiles[currentProfileIndex].interests && <p>Interests: {profiles[currentProfileIndex].interests}</p>}
+                  <div className="flex justify-between mt-4">
+                    <button onClick={() => handleSwipe('left', profiles[currentProfileIndex]._id)} className="p-2 bg-red-500 text-white">Swipe Left</button>
+                    <button onClick={() => handleSwipe('right', profiles[currentProfileIndex]._id)} className="p-2 bg-green-500 text-white">Swipe Right</button>
+                  </div>
+                  {user.gender === 'male' && <p className="mt-2">Right Swipes: {swipeCount}/25</p>}
+                </div>
+              ) : (
+                <p>No more profiles to swipe</p>
+              )}
+              {user.gender === 'female' && (
+                <div className="mt-4">
+                  <h3>Subscription Plans</h3>
+                  <button onClick={() => handleFemalePayment('basic')} className="p-2 bg-blue-500 text-white mr-2">Free (Basic Income)</button>
+                  <button onClick={() => handleFemalePayment('standard')} className="p-2 bg-blue-500 text-white mr-2">$10 (Income > $1000)</button>
+                  <button onClick={() => handleFemalePayment('premium')} className="p-2 bg-blue-500 text-white mr-2">$20 (Income > $1500)</button>
+                  <button onClick={() => handleFemalePayment('elite')} className="p-2 bg-blue-500 text-white">$100 (Income > $2000)</button>
+                </div>
+              )}
+              <button onClick={() => setPage('chat')} className="mt-4 p-2 bg-blue-500 text-white">Go to Chat</button>
+            </div>
+          )}
+          {page === 'chat' && (
+            <div>
+              <h2 className="text-2xl mb-4">Messages</h2>
+              {chatUser ? (
+                <div>
+                  <h3>Chatting with {chatUser.name}</h3>
+                  <div className="border p-4 h-64 overflow-y-auto">
+                    {messages.map((msg, i) => (
+                      <p key={i}>{msg.sender === user._id ? 'You' : chatUser.name}: {msg.message}</p>
+                    ))}
+                  </div>
+                  <form onSubmit={sendMessage} className="mt-4">
+                    <input name="message" type="text" placeholder="Type a message" className="w-full mb-2 p-2 border" required />
+                    <button type="submit" className="p-2 bg-blue-500 text-white">Send</button>
+                  </form>
+                  <button onClick={() => startVideoCall(chatUser.peerId)} className="mt-2 p-2 bg-green-500 text-white">Start Video Call</button>
+                  <div className="mt-4">
+                    <video ref={videoRef} autoPlay className="w-1/2 inline-block" />
+                    <video ref={remoteVideoRef} autoPlay className="w-1/2 inline-block" />
+                  </div>
+                </div>
+              ) : (
+                <p>Select a user to chat</p>
+              )}
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    ReactDOM.render(<App />, document.getElementById('root'));
+  </script>
+</body>
+</html>
